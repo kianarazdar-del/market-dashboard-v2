@@ -759,7 +759,7 @@ const TABS: { id: Tab; label: string; short: string; icon: React.ReactNode }[] =
 export default function App() {
   const [tab, setTab] = useState<Tab>("overview")
   // Track which tabs have been visited so we only mount them once
-  const [visited, setVisited] = useState<Set<Tab>>(new Set(["overview"]))
+  const [visited, setVisited] = useState<Set<Tab>>(new Set<Tab>(["overview"]))
 
   const handleTabChange = (id: Tab) => {
     setTab(id)
