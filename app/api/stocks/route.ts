@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { yahooFetch, parseBars, computeReturns, cacheGet, cacheSet, cacheGetStale } from "@/lib/yahoo"
 
 const NAMES: Record<string,string> = {
   AMZN:"Amazon", TEM:"Tempus AI", INTC:"Intel", VOO:"Vanguard S&P 500 ETF",
@@ -30,100 +31,75 @@ const DESCRIPTIONS: Record<string,string> = {
   AVGO:"Diversified semiconductor company — networking, storage, wireless chips. Added major software business via VMware.",
 }
 
-async function fetchQuotes(symbols: string[]) {
+// Cache TTLs
+const TTL_QUOTES   = 60   // seconds
+const TTL_HISTORY  = 300  // seconds — weekly/daily history changes slowly
+const TTL_NEWS     = 300  // seconds
+
+// ── Fetch all quotes in ONE batch request ────────────────────────────────────
+async function fetchQuotesBatch(symbols: string[]) {
   const syms = symbols.map(encodeURIComponent).join(",")
-  const fields = "regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketPreviousClose,regularMarketDayHigh,regularMarketDayLow,fiftyTwoWeekHigh,fiftyTwoWeekLow,marketCap,trailingPE,regularMarketVolume,sector"
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${syms}&fields=${fields}`
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Referer": "https://finance.yahoo.com/",
-    },
-    cache: "no-store",
-  })
-  if (!res.ok) throw new Error(`Yahoo ${res.status}`)
-  const json = await res.json()
-  return json?.quoteResponse?.result ?? []
+  const fields = [
+    "regularMarketPrice","regularMarketChange","regularMarketChangePercent",
+    "regularMarketDayHigh","regularMarketDayLow",
+    "fiftyTwoWeekHigh","fiftyTwoWeekLow","marketCap","trailingPE",
+    "regularMarketVolume","sector","shortName",
+  ].join(",")
+  return yahooFetch(`/v7/finance/quote?symbols=${syms}&fields=${fields}`)
 }
 
-// Fetch weekly bars for return calculations + daily bars for sparkline
-async function fetchHistory(symbol: string) {
-  try {
-    // 5y weekly for returns
-    const url5y = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1wk&range=5y`
-    const url3m = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=3mo`
-    const hdrs = {
-      "User-Agent": "Mozilla/5.0",
-      "Referer": "https://finance.yahoo.com/",
-    }
-    const [r5y, r3m] = await Promise.all([
-      fetch(url5y, { headers: hdrs, cache: "no-store" }),
-      fetch(url3m, { headers: hdrs, cache: "no-store" }),
-    ])
-    const [j5y, j3m] = await Promise.all([r5y.json(), r3m.json()])
+// ── Fetch history for one symbol (weekly 5y + daily 3mo in parallel) ─────────
+async function fetchHistory(sym: string) {
+  const cacheKey = `history:${sym}`
+  const cached = cacheGet(cacheKey)
+  if (cached) return cached
 
-    const parseBars = (json: any) => {
-      const result = json?.chart?.result?.[0]
-      if (!result) return []
-      const ts: number[] = result.timestamp ?? []
-      const closes: number[] = result.indicators?.quote?.[0]?.close ?? []
-      return ts.map((t, i) => ({
-        date: new Date(t * 1000).toISOString().split("T")[0],
-        close: closes[i] ?? null,
-      })).filter(d => d.close != null && d.close > 0)
-        .sort((a, b) => a.date.localeCompare(b.date))
-    }
+  const [r5y, r3m] = await Promise.all([
+    yahooFetch(`/v8/finance/chart/${encodeURIComponent(sym)}?interval=1wk&range=5y`),
+    yahooFetch(`/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=3mo`),
+  ])
 
-    return { weekly: parseBars(j5y), daily: parseBars(j3m) }
-  } catch { return { weekly: [], daily: [] } }
+  const weekly = r5y.data ? parseBars(r5y.data) : []
+  const daily  = r3m.data ? parseBars(r3m.data) : []
+  const result = { weekly, daily }
+
+  // Only cache if we actually got data
+  if (weekly.length || daily.length) cacheSet(cacheKey, result, TTL_HISTORY)
+  return result
 }
 
-// Compute return % from sorted bar array
-function ret(bars: any[], currentPrice: number, targetDate: string): number | null {
-  let base = null
-  for (const b of bars) {
-    if (b.date <= targetDate) base = b.close
-    else break
-  }
-  if (!base || base <= 0) return null
-  return ((currentPrice - base) / base) * 100
-}
+// ── Fetch news for all symbols in batch (one request per symbol is unavoidable) ──
+// BUT: we cap to 3 news items and skip symbols with cached news
+async function fetchNewsBatch(symbols: string[]) {
+  const newsMap: Record<string, any[]> = {}
 
-function computeReturns(bars: any[], price: number) {
-  if (!bars.length) return { w1: null, m1: null, ytd: null, y1: null, y5: null }
-  const latest = bars[bars.length - 1].date
-  const d = (n: number, unit: "d"|"m"|"y") => {
-    const dt = new Date(latest)
-    if (unit === "d") dt.setDate(dt.getDate() - n)
-    if (unit === "m") dt.setMonth(dt.getMonth() - n)
-    if (unit === "y") dt.setFullYear(dt.getFullYear() - n)
-    return dt.toISOString().split("T")[0]
-  }
-  const ytdDate = latest.substring(0, 4) + "-01-01"
-  return {
-    w1:  ret(bars, price, d(7, "d")),
-    m1:  ret(bars, price, d(1, "m")),
-    ytd: ret(bars, price, ytdDate),
-    y1:  ret(bars, price, d(1, "y")),
-    y5:  ret(bars, price, d(5, "y")),
-  }
-}
+  // Only fetch news for symbols not already cached
+  const needed = symbols.filter(sym => !cacheGet(`news:${sym}`))
 
-async function fetchNews(symbol: string) {
-  try {
-    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(symbol)}&newsCount=5&quotesCount=0`
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://finance.yahoo.com/" },
-      cache: "no-store",
-    })
-    const json = await res.json()
-    return (json?.news ?? []).slice(0, 5).map((n: any) => ({
-      title: n.title ?? "",
-      url: n.link ?? "#",
-      source: n.publisher ?? "Yahoo Finance",
-      time: n.providerPublishTime ? new Date(n.providerPublishTime * 1000).toISOString() : "",
+  // Stagger requests slightly to avoid burst — fetch sequentially in small groups
+  for (let i = 0; i < needed.length; i += 3) {
+    const batch = needed.slice(i, i + 3)
+    await Promise.all(batch.map(async sym => {
+      const { data, rateLimited } = await yahooFetch(
+        `/v1/finance/search?q=${encodeURIComponent(sym)}&newsCount=4&quotesCount=0`
+      )
+      if (!rateLimited && data) {
+        const news = (data?.news ?? []).slice(0, 4).map((n: any) => ({
+          title: n.title ?? "",
+          url: n.link ?? "#",
+          source: n.publisher ?? "Yahoo Finance",
+          time: n.providerPublishTime ? new Date(n.providerPublishTime * 1000).toISOString() : "",
+        }))
+        cacheSet(`news:${sym}`, news, TTL_NEWS)
+      }
     }))
-  } catch { return [] }
+  }
+
+  // Return all — from cache or empty
+  symbols.forEach(sym => {
+    newsMap[sym] = cacheGet(`news:${sym}`) ?? cacheGetStale(`news:${sym}`) ?? []
+  })
+  return newsMap
 }
 
 export async function GET(req: NextRequest) {
@@ -131,40 +107,68 @@ export async function GET(req: NextRequest) {
   const symbols = raw.split(",").map(s => s.trim().toUpperCase()).filter(Boolean)
   if (!symbols.length) return NextResponse.json({ error: "no symbols" }, { status: 400 })
 
-  try {
-    const rawQuotes = await fetchQuotes(symbols)
-    const quoteMap: Record<string, any> = {}
-    rawQuotes.forEach((q: any) => { quoteMap[q.symbol] = q })
+  const cacheKey = `stocks:${symbols.sort().join(",")}`
 
-    const results = await Promise.all(symbols.map(async sym => {
-      const q = quoteMap[sym] ?? {}
-      const price = q.regularMarketPrice ?? 0
-      const { weekly, daily } = await fetchHistory(sym)
-      const returns = computeReturns(weekly, price)
-      const news = await fetchNews(sym)
-      return {
-        symbol: sym,
-        name: NAMES[sym] ?? q.shortName ?? sym,
-        desc: DESCRIPTIONS[sym] ?? "",
-        price,
-        change: q.regularMarketChange ?? 0,
-        changePct: q.regularMarketChangePercent ?? 0,
-        high: q.regularMarketDayHigh ?? 0,
-        low: q.regularMarketDayLow ?? 0,
-        week52High: q.fiftyTwoWeekHigh ?? 0,
-        week52Low: q.fiftyTwoWeekLow ?? 0,
-        marketCap: q.marketCap ?? null,
-        pe: q.trailingPE ?? null,
-        volume: q.regularMarketVolume ?? null,
-        sector: q.sector ?? null,
-        returns,
-        spark: daily,
-        news,
-      }
-    }))
-
-    return NextResponse.json({ data: results, ts: Date.now() })
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+  // ── 1. Full cache hit — return immediately ────────────────────────────────
+  const cached = cacheGet(cacheKey)
+  if (cached) {
+    return NextResponse.json({ data: cached, ts: Date.now(), cached: true })
   }
+
+  // ── 2. Fetch quotes (single batch) ───────────────────────────────────────
+  const { data: quoteData, rateLimited } = await fetchQuotesBatch(symbols)
+
+  // ── 3. Handle 429 — serve stale ──────────────────────────────────────────
+  if (rateLimited) {
+    const stale = cacheGetStale(cacheKey)
+    return NextResponse.json({
+      data: stale ?? [],
+      ts: Date.now(),
+      rateLimited: true,
+      warning: "Live data temporarily unavailable — showing most recent cached data.",
+    })
+  }
+
+  const rawQuotes: any[] = quoteData?.quoteResponse?.result ?? []
+  const quoteMap: Record<string,any> = {}
+  rawQuotes.forEach((q: any) => { quoteMap[q.symbol] = q })
+
+  // ── 4. Fetch history for all symbols in parallel ──────────────────────────
+  const histories = await Promise.all(symbols.map(sym => fetchHistory(sym)))
+  const histMap: Record<string,any> = {}
+  symbols.forEach((sym, i) => { histMap[sym] = histories[i] })
+
+  // ── 5. Fetch news (cached per-symbol, batched in groups of 3) ────────────
+  const newsMap = await fetchNewsBatch(symbols)
+
+  // ── 6. Assemble result ────────────────────────────────────────────────────
+  const results = symbols.map(sym => {
+    const q = quoteMap[sym] ?? {}
+    const price = q.regularMarketPrice ?? 0
+    const { weekly, daily } = histMap[sym] ?? { weekly: [], daily: [] }
+    return {
+      symbol: sym,
+      name: NAMES[sym] ?? q.shortName ?? sym,
+      desc: DESCRIPTIONS[sym] ?? "",
+      price,
+      change: q.regularMarketChange ?? 0,
+      changePct: q.regularMarketChangePercent ?? 0,
+      high: q.regularMarketDayHigh ?? 0,
+      low: q.regularMarketDayLow ?? 0,
+      week52High: q.fiftyTwoWeekHigh ?? 0,
+      week52Low: q.fiftyTwoWeekLow ?? 0,
+      marketCap: q.marketCap ?? null,
+      pe: q.trailingPE ?? null,
+      volume: q.regularMarketVolume ?? null,
+      sector: q.sector ?? null,
+      returns: computeReturns(weekly, price),
+      spark: daily,
+      news: newsMap[sym] ?? [],
+    }
+  })
+
+  // ── 7. Cache the full assembled result ───────────────────────────────────
+  cacheSet(cacheKey, results, TTL_QUOTES)
+
+  return NextResponse.json({ data: results, ts: Date.now(), cached: false })
 }

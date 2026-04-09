@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server"
+import { yahooFetch, parseBars, cacheGet, cacheSet, cacheGetStale } from "@/lib/yahoo"
 
-// Symbols for market overview tab
-const SYMBOLS = ["^GSPC","^IXIC","^DJI","^RUT","^VIX","^TNX","BTC-USD","ETH-USD","CL=F"]
+const SYMBOLS      = ["^GSPC","^IXIC","^DJI","^RUT","^VIX","^TNX","BTC-USD","ETH-USD","CL=F"]
+const SPARK_SYMS   = ["^GSPC","^IXIC","BTC-USD"]
+const TTL_QUOTES   = 60
+const TTL_SPARKS   = 300
+const TTL_NEWS     = 300
+const KEY_QUOTES   = "market:quotes"
+const KEY_SPARKS   = "market:sparks"
+const KEY_NEWS     = "market:news"
 
 const NAMES: Record<string,string> = {
   "^GSPC":"S&P 500","^IXIC":"Nasdaq","^DJI":"Dow Jones","^RUT":"Russell 2000",
@@ -9,90 +16,99 @@ const NAMES: Record<string,string> = {
   "BTC-USD":"Bitcoin","ETH-USD":"Ethereum","CL=F":"Crude Oil (WTI)",
 }
 
-async function fetchYahoo(symbols: string[]) {
+async function fetchQuotes() {
   const fields = [
     "regularMarketPrice","regularMarketChange","regularMarketChangePercent",
     "regularMarketPreviousClose","regularMarketDayHigh","regularMarketDayLow",
-    "fiftyTwoWeekHigh","fiftyTwoWeekLow","regularMarketTime"
+    "fiftyTwoWeekHigh","fiftyTwoWeekLow","regularMarketTime",
   ].join(",")
-  const syms = symbols.map(encodeURIComponent).join(",")
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${syms}&fields=${fields}`
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Referer": "https://finance.yahoo.com/",
-    },
-    cache: "no-store",
-  })
-  if (!res.ok) throw new Error(`Yahoo returned ${res.status}`)
-  const json = await res.json()
-  return json?.quoteResponse?.result ?? []
+  const syms = SYMBOLS.map(encodeURIComponent).join(",")
+  const { data, rateLimited, error } = await yahooFetch(
+    `/v7/finance/quote?symbols=${syms}&fields=${fields}`
+  )
+  if (rateLimited) return { quotes: null, rateLimited: true }
+  if (error || !data) return { quotes: null, rateLimited: false }
+  const quotes = (data?.quoteResponse?.result ?? []).map((q: any) => ({
+    symbol:    q.symbol,
+    name:      NAMES[q.symbol] ?? q.shortName ?? q.symbol,
+    price:     q.regularMarketPrice ?? 0,
+    change:    q.regularMarketChange ?? 0,
+    changePct: q.regularMarketChangePercent ?? 0,
+    high:      q.regularMarketDayHigh ?? 0,
+    low:       q.regularMarketDayLow ?? 0,
+    week52High: q.fiftyTwoWeekHigh ?? 0,
+    week52Low:  q.fiftyTwoWeekLow ?? 0,
+    time:       q.regularMarketTime ?? 0,
+  }))
+  return { quotes, rateLimited: false }
 }
 
-async function fetchSparkline(symbol: string) {
-  try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1mo`
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://finance.yahoo.com/" },
-      cache: "no-store",
+async function fetchSparks(): Promise<Record<string,any[]>> {
+  const sparks: Record<string,any[]> = {}
+  await Promise.all(
+    SPARK_SYMS.map(async sym => {
+      const { data, rateLimited } = await yahooFetch(
+        `/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=1mo`
+      )
+      sparks[sym] = (!rateLimited && data) ? parseBars(data) : []
     })
-    const json = await res.json()
-    const result = json?.chart?.result?.[0]
-    if (!result) return []
-    const timestamps: number[] = result.timestamp ?? []
-    const closes: number[] = result.indicators?.quote?.[0]?.close ?? []
-    return timestamps.map((t, i) => ({
-      date: new Date(t * 1000).toISOString().split("T")[0],
-      close: closes[i] ?? null,
-    })).filter(d => d.close != null)
-  } catch { return [] }
+  )
+  return sparks
 }
 
 async function fetchNews() {
-  try {
-    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=%5EGSPC&newsCount=8&quotesCount=0`
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://finance.yahoo.com/" },
-      cache: "no-store",
-    })
-    const json = await res.json()
-    return (json?.news ?? []).slice(0, 8).map((n: any) => ({
-      title: n.title ?? "",
-      url: n.link ?? "#",
-      source: n.publisher ?? "Yahoo Finance",
-      time: n.providerPublishTime ? new Date(n.providerPublishTime * 1000).toISOString() : "",
-    }))
-  } catch { return [] }
+  const { data, rateLimited } = await yahooFetch(
+    `/v1/finance/search?q=%5EGSPC&newsCount=8&quotesCount=0`
+  )
+  if (rateLimited || !data) return []
+  return (data?.news ?? []).slice(0, 8).map((n: any) => ({
+    title:  n.title ?? "",
+    url:    n.link ?? "#",
+    source: n.publisher ?? "Yahoo Finance",
+    time:   n.providerPublishTime ? new Date(n.providerPublishTime * 1000).toISOString() : "",
+  }))
 }
 
 export async function GET() {
-  try {
-    const [rawQuotes, news] = await Promise.all([
-      fetchYahoo(SYMBOLS),
-      fetchNews(),
-    ])
-
-    const quotes = rawQuotes.map((q: any) => ({
-      symbol: q.symbol,
-      name: NAMES[q.symbol] ?? q.shortName ?? q.symbol,
-      price: q.regularMarketPrice ?? 0,
-      change: q.regularMarketChange ?? 0,
-      changePct: q.regularMarketChangePercent ?? 0,
-      high: q.regularMarketDayHigh ?? 0,
-      low: q.regularMarketDayLow ?? 0,
-      week52High: q.fiftyTwoWeekHigh ?? 0,
-      week52Low: q.fiftyTwoWeekLow ?? 0,
-      time: q.regularMarketTime ?? 0,
-    }))
-
-    // Fetch sparklines for major indices in parallel
-    const sparkSymbols = ["^GSPC","^IXIC","BTC-USD"]
-    const sparkData = await Promise.all(sparkSymbols.map(s => fetchSparkline(s)))
-    const sparks: Record<string, any[]> = {}
-    sparkSymbols.forEach((s, i) => { sparks[s] = sparkData[i] })
-
-    return NextResponse.json({ quotes, sparks, news, ts: Date.now() })
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 })
+  // ── 1. Full cache hit ────────────────────────────────────────────────────
+  const cQ = cacheGet(KEY_QUOTES)
+  const cS = cacheGet(KEY_SPARKS)
+  const cN = cacheGet(KEY_NEWS)
+  if (cQ && cS && cN) {
+    return NextResponse.json({ quotes: cQ, sparks: cS, news: cN, ts: Date.now(), cached: true })
   }
+
+  // ── 2. Fetch quotes + news in parallel ───────────────────────────────────
+  const [{ quotes, rateLimited }, newsFetch] = await Promise.all([
+    fetchQuotes(),
+    cN ? Promise.resolve(cN) : fetchNews(),
+  ])
+
+  // ── 3. 429 — serve stale ─────────────────────────────────────────────────
+  if (rateLimited) {
+    return NextResponse.json({
+      quotes:      cacheGetStale(KEY_QUOTES) ?? [],
+      sparks:      cacheGetStale(KEY_SPARKS) ?? {},
+      news:        cacheGetStale(KEY_NEWS)   ?? [],
+      ts:          Date.now(),
+      rateLimited: true,
+      warning:     "Live data temporarily rate-limited — showing most recent cached data.",
+    })
+  }
+
+  // ── 4. Fetch sparks (only once quotes confirmed OK) ──────────────────────
+  const sparks = cS ?? await fetchSparks()
+
+  // ── 5. Cache everything ──────────────────────────────────────────────────
+  if (quotes)        cacheSet(KEY_QUOTES, quotes,    TTL_QUOTES)
+  if (sparks)        cacheSet(KEY_SPARKS, sparks,    TTL_SPARKS)
+  if (newsFetch?.length) cacheSet(KEY_NEWS, newsFetch, TTL_NEWS)
+
+  return NextResponse.json({
+    quotes: quotes ?? [],
+    sparks: sparks ?? {},
+    news:   newsFetch ?? [],
+    ts:     Date.now(),
+    cached: false,
+  })
 }
