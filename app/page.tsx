@@ -763,7 +763,7 @@ export default function App() {
 
   const handleTabChange = (id: Tab) => {
     setTab(id)
-    setVisited(prev => new Set([...prev, id]))
+    setVisited(prev => new Set<Tab>(Array.from(prev).concat(id)))
   }
 
   return (
