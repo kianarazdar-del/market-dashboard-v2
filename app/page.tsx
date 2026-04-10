@@ -192,11 +192,16 @@ function buildSummary(quotes: any[]): string[] {
     else if (v < 30) lines.push(`Volatility is elevated (VIX ${v.toFixed(1)}) — expect larger daily swings.`)
     else             lines.push(`Volatility is very high (VIX ${v.toFixed(1)}) — significant fear in the market.`)
   }
-  if (tnx) lines.push(`The 10-year Treasury yield is at ${tnx.price.toFixed(2)}%${tnx.changePct > 0.5 ? " and rising, which can pressure stock valuations" : tnx.changePct < -0.5 ? " and falling, suggesting a flight to safety" : " — stable today"}.`)
-  if (btc) {
-    if (btc.changePct > 2)       lines.push(`Bitcoin is up ${pct(btc.changePct)} — crypto is joining the risk-on move.`)
-    else if (btc.changePct < -2) lines.push(`Bitcoin is down ${pct(btc.changePct)} — crypto weakness signals risk-off sentiment.`)
+  if (tnx) {
+  lines.push(`The 10-year Treasury yield is at ${tnx.price.toFixed(2)}%${tnx.changePct > 0.5 ? " and rising, which can pressure growth stocks." : ""}`)
+}
+if (btc) {
+  if (btc.changePct > 2) {
+    lines.push(`Bitcoin is up ${pct(btc.changePct)} — crypto is joining the risk-on move.`)
+  } else if (btc.changePct < -2) {
+    lines.push(`Bitcoin is down ${pct(btc.changePct)} — crypto weakness signals risk-off sentiment.`)
   }
+}
   return lines
 }
 
