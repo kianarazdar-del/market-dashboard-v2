@@ -167,44 +167,74 @@ function useTabData<T>(fetchFn: () => Promise<T>, deps: any[] = []) {
 }
 
 // ─── Tab 1: Market Overview ───────────────────────────────────────────────────
-
 function buildSummary(quotes: any[]): string[] {
   if (!quotes?.length) return []
+
   const get = (sym: string) => quotes.find((q: any) => q.symbol === sym)
-  const sp = get("^GSPC"), nq = get("^IXIC"), vix = get("^VIX"), tnx = get("^TNX"), btc = get("BTC-USD")
+
+  const sp = get("^GSPC")
+  const nq = get("^IXIC")
+  const vix = get("^VIX")
+  const tnx = get("^TNX")
+  const btc = get("BTC-USD")
+
   const lines: string[] = []
+
   if (sp) {
     const p = sp.changePct
-    if (p > 0.5)       lines.push(`U.S. stocks are rallying — the S&P 500 is up ${pct(p)} today, indicating broad market strength.`)
-    else if (p < -0.5) lines.push(`U.S. stocks are selling off — the S&P 500 is down ${pct(p)} today.`)
-    else               lines.push(`The S&P 500 is essentially flat today (${pct(p)}), with no strong directional move.`)
+    if (p > 0.5) {
+      lines.push(`U.S. stocks are rallying — the S&P 500 is up ${pct(p)} today, indicating broad market strength.`)
+    } else if (p < -0.5) {
+      lines.push(`U.S. stocks are selling off — the S&P 500 is down ${pct(p)} today.`)
+    } else {
+      lines.push(`The S&P 500 is essentially flat today (${pct(p)}), with no strong directional move.`)
+    }
   }
+
   if (sp && nq) {
     const diff = nq.changePct - sp.changePct
-    if (diff > 0.4)       lines.push(`Tech is outperforming — the Nasdaq is beating the S&P 500 by ${diff.toFixed(1)} percentage points.`)
-    else if (diff < -0.4) lines.push(`Tech is lagging today — the Nasdaq is trailing the S&P 500 by ${Math.abs(diff).toFixed(1)} points.`)
-    else                  lines.push(`Tech and the broad market are moving in sync today.`)
+    if (diff > 0.4) {
+      lines.push(`Tech is outperforming — the Nasdaq is beating the S&P 500 by ${diff.toFixed(1)} percentage points.`)
+    } else if (diff < -0.4) {
+      lines.push(`Tech is lagging today — the Nasdaq is trailing the S&P 500 by ${Math.abs(diff).toFixed(1)} points.`)
+    } else {
+      lines.push(`Tech and the broad market are moving in sync today.`)
+    }
   }
+
   if (vix) {
     const v = vix.price
-    if (v < 15)      lines.push(`Volatility is low (VIX ${v.toFixed(1)}) — investors appear calm and confident.`)
-    else if (v < 20) lines.push(`Volatility is moderate (VIX ${v.toFixed(1)}) — some caution but no panic.`)
-    else if (v < 30) lines.push(`Volatility is elevated (VIX ${v.toFixed(1)}) — expect larger daily swings.`)
-    else             lines.push(`Volatility is very high (VIX ${v.toFixed(1)}) — significant fear in the market.`)
+    if (v < 15) {
+      lines.push(`Volatility is low (VIX ${v.toFixed(1)}) — investors appear calm and confident.`)
+    } else if (v < 20) {
+      lines.push(`Volatility is moderate (VIX ${v.toFixed(1)}) — some caution but no panic.`)
+    } else if (v < 30) {
+      lines.push(`Volatility is elevated (VIX ${v.toFixed(1)}) — expect larger daily swings.`)
+    } else {
+      lines.push(`Volatility is very high (VIX ${v.toFixed(1)}) — significant fear in the market.`)
+    }
   }
+
   if (tnx) {
-  lines.push(`The 10-year Treasury yield is at ${tnx.price.toFixed(2)}%${tnx.changePct > 0.5 ? " and rising, which can pressure growth stocks." : ""}`)
-}
-if (btc) {
-  if (btc.changePct > 2) {
-    lines.push(`Bitcoin is up ${pct(btc.changePct)} — crypto is joining the risk-on move.`)
-  } else if (btc.changePct < -2) {
-    lines.push(`Bitcoin is down ${pct(btc.changePct)} — crypto weakness signals risk-off sentiment.`)
+    lines.push(
+      `The 10-year Treasury yield is at ${tnx.price.toFixed(2)}%${
+        tnx.changePct > 0.5
+          ? " and rising, which can pressure growth stocks."
+          : ""
+      }`
+    )
   }
-}
+
+  if (btc) {
+    if (btc.changePct > 2) {
+      lines.push(`Bitcoin is up ${pct(btc.changePct)} — crypto is joining the risk-on move.`)
+    } else if (btc.changePct < -2) {
+      lines.push(`Bitcoin is down ${pct(btc.changePct)} — crypto weakness signals risk-off sentiment.`)
+    }
+  }
+
   return lines
 }
-
 function MarketOverview() {
   const { data, loading, error, ts, warning, cached, refresh, loadOnce } = useTabData<any>(
     () => fetch("/api/market").then(r => r.json())
