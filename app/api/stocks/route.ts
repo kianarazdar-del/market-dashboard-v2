@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server"
-import { yahooFetch, parseBars, computeReturns, cacheGet, cacheSet, cacheGetStale } from "@/lib/yahoo"
 
 const NAMES: Record<string,string> = {
   AMZN:"Amazon", TEM:"Tempus AI", INTC:"Intel", VOO:"Vanguard S&P 500 ETF",
