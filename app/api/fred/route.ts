@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server"
-import { cacheGet, cacheSet, cacheGetStale } from "@/lib/yahoo"
 
 const TTL_FRED = 3600  // FRED data is published monthly — 1hr cache is fine
 const TTL_NEWS = 300
