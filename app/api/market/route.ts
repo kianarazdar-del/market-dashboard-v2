@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server"
-import { yahooFetch, parseBars, cacheGet, cacheSet, cacheGetStale } from "@/lib/yahoo"
 
 const SYMBOLS      = ["^GSPC","^IXIC","^DJI","^RUT","^VIX","^TNX","BTC-USD","ETH-USD","CL=F"]
 const SPARK_SYMS   = ["^GSPC","^IXIC","BTC-USD"]
